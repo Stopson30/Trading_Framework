@@ -1,0 +1,111 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Define the transaction fee
+transaction_fee = 0.01  # 1%
+
+# Define the total bankroll
+total_bankroll = 100000  # $100k
+
+# Initial investment in each asset
+initial_investment = 10000  # $10k
+
+# Define slippage
+slippage = 0.0005  # 0.05%
+
+# Download historical data from Yahoo Finance
+tsla_data = yf.download('TSLA', start='2022-11-03', end='2023-07-03')
+eth_data = yf.download('ETH-USD', start='2022-11-03', end='2023-07-03')
+tsm_data = yf.download('TSM', start='2022-11-03', end='2023-07-03')
+
+# Forward fill any missing data
+tsla_data.ffill(inplace=True)
+eth_data.ffill(inplace=True)
+tsm_data.ffill(inplace=True)
+
+def backtest(change_threshold):
+    tsla_quantity = initial_investment / tsla_data.iloc[0]['Open']
+    eth_quantity = initial_investment / eth_data.iloc[0]['Open']
+    tsm_quantity = initial_investment / tsm_data.iloc[0]['Open']
+    tsla_quantity = tsla_quantity * (1 - transaction_fee) * (1 - slippage)
+    eth_quantity = eth_quantity * (1 - transaction_fee) * (1 - slippage)
+    tsm_quantity = tsm_quantity * (1 - transaction_fee) * (1 - slippage)
+    total_bankroll_remaining = total_bankroll - 3 * initial_investment
+    total_fees_paid = 3 * initial_investment * transaction_fee
+    portfolio_values = pd.DataFrame(index=tsla_data.index, columns=['value'])
+    portfolio_values.iloc[0]['value'] = total_bankroll_remaining + tsla_quantity * tsla_data.iloc[0]['Open'] + eth_quantity * eth_data.iloc[0]['Open'] + tsm_quantity * tsm_data.iloc[0]['Open']
+
+    for i in range(1, len(tsla_data)):
+        current_tsla_price = tsla_data.iloc[i]['Open']
+        current_eth_price = eth_data.iloc[i]['Open']
+        current_tsm_price = tsm_data.iloc[i]['Open']
+        tsla_change = (current_tsla_price - tsla_data.iloc[i-1]['Open']) / tsla_data.iloc[i-1]['Open']
+        eth_change = (current_eth_price - eth_data.iloc[i-1]['Open']) / eth_data.iloc[i-1]['Open']
+        tsm_change = (current_tsm_price - tsm_data.iloc[i-1]['Open']) / tsm_data.iloc[i-1]['Open']
+
+        # Sell the asset which has increased above the threshold and buy equal amounts of the other two
+        if abs(tsla_change) > change_threshold:
+            total_fees_paid += tsla_quantity * current_tsla_price * transaction_fee
+            proceeds = tsla_quantity * current_tsla_price * (1 - transaction_fee) * (1 - slippage)
+            tsla_quantity = 0
+            eth_quantity += proceeds / (2 * current_eth_price) * (1 - transaction_fee) * (1 - slippage)
+            tsm_quantity += proceeds / (2 * current_tsm_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        if abs(eth_change) > change_threshold:
+            total_fees_paid += eth_quantity * current_eth_price * transaction_fee
+            proceeds = eth_quantity * current_eth_price * (1 - transaction_fee) * (1 - slippage)
+            eth_quantity = 0
+            tsla_quantity += proceeds / (2 * current_tsla_price) * (1 - transaction_fee) * (1 - slippage)
+            tsm_quantity += proceeds / (2 * current_tsm_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        if abs(tsm_change) > change_threshold:
+            total_fees_paid += tsm_quantity * current_tsm_price * transaction_fee
+            proceeds = tsm_quantity * current_tsm_price * (1 - transaction_fee) * (1 - slippage)
+            tsm_quantity = 0
+            tsla_quantity += proceeds / (2 * current_tsla_price) * (1 - transaction_fee) * (1 - slippage)
+            eth_quantity += proceeds / (2 * current_eth_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        portfolio_values.iloc[i]['value'] = total_bankroll_remaining + tsla_quantity * current_tsla_price + eth_quantity * current_eth_price + tsm_quantity * current_tsm_price
+
+    final_value = total_bankroll_remaining + tsla_quantity * tsla_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage) + eth_quantity * eth_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage) + tsm_quantity * tsm_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+
+    total_return = (final_value - 100000) / 100000
+    annualized_return = (1 + total_return) ** (365.25 / len(portfolio_values)) - 1
+    max_drawdown = (portfolio_values['value'].cummax() - portfolio_values['value']).max() / portfolio_values['value'].cummax().max()
+    sharpe_ratio = (annualized_return - 0.01) / (portfolio_values['value'].pct_change().std() * np.sqrt(252))
+
+    final_tsla_value = initial_investment / tsla_data.iloc[0]['Open'] * tsla_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+    final_eth_value = initial_investment / eth_data.iloc[0]['Open'] * eth_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+    final_tsm_value = initial_investment / tsm_data.iloc[0]['Open'] * tsm_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+
+    return final_value, sharpe_ratio, total_fees_paid, final_tsla_value, final_eth_value, final_tsm_value
+
+change_thresholds = np.arange(0.01, 0.10, 0.01)  # 1% to 10% with a step of 1%
+results = []
+for change_threshold in change_thresholds:
+    results.append(backtest(change_threshold))
+
+best_change_threshold = change_thresholds[np.argmax([x[1] for x in results])]  # Select the change threshold with the highest Sharpe ratio
+best_final_value = max([x[0] for x in results])
+best_sharpe_ratio = max([x[1] for x in results])
+
+plt.figure(figsize=(10, 6))
+plt.plot(change_thresholds * 100, [x[0] for x in results], label='Final portfolio value')
+plt.plot(change_thresholds * 100, [x[1] * 100000 for x in results], label='Sharpe ratio x 100k')
+plt.legend()
+plt.xlabel('Change threshold (%)')
+plt.title('Backtest results over different change thresholds')
+plt.show()
+
+print(f"Best change threshold: {best_change_threshold * 100}%")
+print(f"Best final portfolio value: ${best_final_value}")
+print(f"Best Sharpe ratio: {best_sharpe_ratio}")
+print(f"Final value if held TSLA: ${results[-1][3]}")
+print(f"Final value if held ETH: ${results[-1][4]}")
+print(f"Final value if held TSM: ${results[-1][5]}")
+print(f"Total fees paid: ${sum([x[2] for x in results])}")
