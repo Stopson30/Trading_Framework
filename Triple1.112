@@ -1,0 +1,137 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Define the transaction fee
+transaction_fee = 0.01  # 1%
+
+# Define the total bankroll
+total_bankroll = 100000  # $100k
+
+# Initial investment in each asset
+initial_investment = total_bankroll / 3  # 1/3 of total bankroll for each asset
+
+# Define slippage
+slippage = 0.0005  # 0.05%
+
+# Define stop loss level
+stop_loss_level = total_bankroll * 0.7  # 70% of initial bankroll
+
+# Download historical data from Yahoo Finance
+tsla_data = yf.download('TSLA', start='2022-07-03', end='2023-07-03')
+matic_data = yf.download('MATIC-USD', start='2022-07-03', end='2023-07-03')
+eth_data = yf.download('ETH-USD', start='2022-07-03', end='2023-07-03')
+
+# Forward fill any missing data
+tsla_data.ffill(inplace=True)
+matic_data.ffill(inplace=True)
+eth_data.ffill(inplace=True)
+
+# Define backtest function
+def backtest(change_threshold):
+    # Calculate initial quantity of each asset
+    tsla_quantity = initial_investment / tsla_data.iloc[0]['Open']
+    matic_quantity = initial_investment / matic_data.iloc[0]['Open']
+    eth_quantity = initial_investment / eth_data.iloc[0]['Open']
+
+    # Adjust for transaction fee and slippage
+    tsla_quantity = tsla_quantity * (1 - transaction_fee) * (1 - slippage)
+    matic_quantity = matic_quantity * (1 - transaction_fee) * (1 - slippage)
+    eth_quantity = eth_quantity * (1 - transaction_fee) * (1 - slippage)
+
+    # Initialize portfolio values DataFrame
+    portfolio_values = pd.DataFrame(index=tsla_data.index, columns=['value'])
+    portfolio_values.iloc[0]['value'] = tsla_quantity * tsla_data.iloc[0]['Open'] + matic_quantity * matic_data.iloc[0]['Open'] + eth_quantity * eth_data.iloc[0]['Open']
+
+    total_fees_paid = 0
+
+    # Loop through each day
+    for i in range(1, len(tsla_data)):
+        # Update current prices
+        current_tsla_price = tsla_data.iloc[i]['Open']
+        current_matic_price = matic_data.iloc[i]['Open']
+        current_eth_price = eth_data.iloc[i]['Open']
+
+        # Calculate price changes
+        tsla_change = (current_tsla_price - tsla_data.iloc[i-1]['Open']) / tsla_data.iloc[i-1]['Open']
+        matic_change = (current_matic_price - matic_data.iloc[i-1]['Open']) / matic_data.iloc[i-1]['Open']
+        eth_change = (current_eth_price - eth_data.iloc[i-1]['Open']) / eth_data.iloc[i-1]['Open']
+
+        # Execute trading strategy based on price changes
+        if abs(tsla_change) > change_threshold:
+            total_fees_paid += tsla_quantity * current_tsla_price * transaction_fee
+            proceeds = tsla_quantity * current_tsla_price * (1 - transaction_fee) * (1 - slippage)
+            tsla_quantity = 0
+            matic_quantity += proceeds / (2 * current_matic_price) * (1 - transaction_fee) * (1 - slippage)
+            eth_quantity += proceeds / (2 * current_eth_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        if abs(matic_change) > change_threshold:
+            total_fees_paid += matic_quantity * current_matic_price * transaction_fee
+            proceeds = matic_quantity * current_matic_price * (1 - transaction_fee) * (1 - slippage)
+            matic_quantity = 0
+            tsla_quantity += proceeds / (2 * current_tsla_price) * (1 - transaction_fee) * (1 - slippage)
+            eth_quantity += proceeds / (2 * current_eth_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        if abs(eth_change) > change_threshold:
+            total_fees_paid += eth_quantity * current_eth_price * transaction_fee
+            proceeds = eth_quantity * current_eth_price * (1 - transaction_fee) * (1 - slippage)
+            eth_quantity = 0
+            tsla_quantity += proceeds / (2 * current_tsla_price) * (1 - transaction_fee) * (1 - slippage)
+            matic_quantity += proceeds / (2 * current_matic_price) * (1 - transaction_fee) * (1 - slippage)
+            total_fees_paid += proceeds * transaction_fee
+
+        # Update portfolio values
+        portfolio_values.iloc[i]['value'] = tsla_quantity * current_tsla_price + matic_quantity * current_matic_price + eth_quantity * current_eth_price
+
+        # Check for stop loss
+        if portfolio_values.iloc[i]['value'] < stop_loss_level:
+            break  # End the trading if portfolio's value falls below the stop loss level
+
+    final_value = tsla_quantity * tsla_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage) + matic_quantity * matic_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage) + eth_quantity * eth_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+
+    # Calculate performance metrics
+    total_return = (final_value - total_bankroll) / total_bankroll
+    annualized_return = (1 + total_return) ** (365.25 / len(portfolio_values)) - 1
+    max_drawdown = (portfolio_values['value'].cummax() - portfolio_values['value']).max() / portfolio_values['value'].cummax().max()
+    sharpe_ratio = (annualized_return - 0.01) / (portfolio_values['value'].pct_change().std() * np.sqrt(252))
+
+    # Calculate the final value if simply held each asset
+    final_tsla_value = initial_investment / tsla_data.iloc[0]['Open'] * tsla_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+    final_matic_value = initial_investment / matic_data.iloc[0]['Open'] * matic_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+    final_eth_value = initial_investment / eth_data.iloc[0]['Open'] * eth_data.iloc[-1]['Close'] * (1 - transaction_fee) * (1 - slippage)
+
+    return final_value, sharpe_ratio, total_fees_paid, final_tsla_value, final_matic_value, final_eth_value
+
+# Define the range of change thresholds to test
+change_thresholds = np.arange(0.01, 0.1, 0.01)  # From 1% to 10% with a step of 1%
+
+# Backtest over the range of change thresholds
+results = []
+for change_threshold in change_thresholds:
+    results.append(backtest(change_threshold))
+
+# Find the best change threshold
+best_change_threshold = change_thresholds[np.argmax([x[1] for x in results])]
+
+# Print the results
+print('Best Change Threshold: ', best_change_threshold)
+print('Best Final Portfolio Value: ', max([x[0] for x in results]))
+print('Best Sharpe Ratio: ', max([x[1] for x in results]))
+print('Total Fees Paid: ', sum([x[2] for x in results]))
+
+# Plot the results
+plt.figure(figsize=(12, 6))
+plt.plot(change_thresholds, [x[0] for x in results], marker='o', linestyle='-', color='b', label='Final Portfolio Value')
+plt.plot(change_thresholds, [x[1] for x in results], marker='o', linestyle='-', color='r', label='Sharpe Ratio')
+plt.xlabel('Change Threshold')
+plt.ylabel('Value')
+plt.legend()
+plt.show()
+
+# Print the final value if simply held each asset
+print('Final Value If Held TSLA: ', results[-1][3])
+print('Final Value If Held MATIC: ', results[-1][4])
+print('Final Value If Held ETH: ', results[-1][5])
